@@ -1,0 +1,55 @@
+name: Respaldo diario Marco Polo
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 2:00 a. m. hora de Colombia
+  workflow_dispatch:       # permite correrlo a mano
+
+permissions:
+  contents: read
+
+jobs:
+  respaldo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Exportar la base de datos
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p respaldo
+          supabase db dump --db-url "$DB_URL" -f respaldo/roles.sql --role-only
+          supabase db dump --db-url "$DB_URL" -f respaldo/schema.sql
+          supabase db dump --db-url "$DB_URL" -f respaldo/data.sql --data-only --use-copy
+          # Falla si la exportación quedó vacía o sin las habitaciones
+          test -s respaldo/schema.sql
+          grep -q 'habitaciones' respaldo/data.sql
+
+      - name: Cifrar la copia
+        env:
+          CLAVE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$CLAVE"
+          FECHA=$(TZ=America/Bogota date +%Y-%m-%d)
+          echo "FECHA=$FECHA" >> "$GITHUB_ENV"
+          umask 077
+          printf '%s' "$CLAVE" > "$RUNNER_TEMP/clave"
+          tar -czf - respaldo | gpg --batch --yes --pinentry-mode loopback \
+            --symmetric --cipher-algo AES256 \
+            --passphrase-file "$RUNNER_TEMP/clave" \
+            -o "marco-polo-$FECHA.tar.gz.gpg"
+          rm -rf respaldo "$RUNNER_TEMP/clave"
+
+      - name: Guardar la copia por 30 días
+        uses: actions/upload-artifact@v4
+        with:
+          name: marco-polo-${{ env.FECHA }}
+          path: marco-polo-*.tar.gz.gpg
+          retention-days: 30
+          if-no-files-found: error
